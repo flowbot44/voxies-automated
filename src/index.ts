@@ -6,18 +6,50 @@ import { v4 as uuidv4 } from 'uuid';
 
 require("dotenv").config();
 
+const CONFIG = {
+    CRON_SCHEDULE: '0 */6 * * *',
+    RPC_URL: 'https://polygon-rpc.com/',
+    CONTRACT_ADDRESS: '0x564edcE4FAa31e48421100a9Da7B8EB4A38b3654',
+    GAS_MULTIPLIER: 2n,
+    RENTAL_DURATION: 604800, // 7 days
+    PRICE_INCREASE_PERCENT: 1.1,
+    PRICE_DECREASE_PERCENT: 0.9,
+    MIN_PRICE_FOR_DECREASE: 3,
+    QUICK_RENTAL_MINUTES: 180,
+    PRICE_DROP_DAYS: 3,
+    MAX_RETRY_ATTEMPTS: 3,
+    RETRY_DELAY_MS: 5000,
+    CONFIRMATION_BLOCKS: 10
+} as const;
+
+class Logger {
+    static log(message: string, data?: any) {
+        const timestamp = new Date().toISOString();
+        console.log(`[${timestamp}] ${message}`);
+        if (data) console.log(data);
+    }
+
+    static error(message: string, error: any) {
+        const timestamp = new Date().toISOString();
+        console.error(`[${timestamp}] ERROR: ${message}`, error);
+    }
+}
 
 //every 6 hours
-cron.schedule('0 */6 * * *', () => {
-    console.log("check voxie the rentals")
-    checkVoxiesRentals();
+cron.schedule(CONFIG.CRON_SCHEDULE, async () => {
+    Logger.log("Starting rental check");
+    if (await checkHealth()) {
+        await checkVoxiesRentals();
+    } else {
+        Logger.error('Skipping rental check due to health check failure', null);
+    }
 });
 
-const provider = new ethers.JsonRpcProvider("https://polygon-rpc.com/")
+const provider = new ethers.JsonRpcProvider(CONFIG.RPC_URL)
 const signer = new ethers.Wallet(process.env.PRIVATE_KEY!, provider);
 
 const voxieLoanAbi = JSON.parse(fs.readFileSync('abis/VoxieLoan.abi.json', 'utf8'))
-const voxieLoanContract = new ethers.Contract('0x564edcE4FAa31e48421100a9Da7B8EB4A38b3654', voxieLoanAbi, provider);
+const voxieLoanContract = new ethers.Contract(CONFIG.CONTRACT_ADDRESS, voxieLoanAbi, provider);
 
 
 async function checkVoxiesRentals() {
@@ -39,15 +71,15 @@ async function checkVoxiesRentals() {
             // cancel
             await cancelRental(loan);            
             // if rented within the 3 increase price by 10% round up
-            if(isLoanRentedQuickly(loan,180)){
-                voxel = Math.ceil(voxel * 1.1)
+            if(isLoanRentedQuickly(loan, CONFIG.QUICK_RENTAL_MINUTES)){
+                voxel = Math.ceil(voxel * CONFIG.PRICE_INCREASE_PERCENT)
                 console.log(`Loan ${loan.bundleUUID} took ${(parseInt(loan.startingTime+"000") - parseInt(loan.timestamp+"000"))/60000} minutes to rent new price ${voxel}`) 
             }
             // recreate
             await createVoxiesRental(loan.nftAddresses,tokenIds,voxel)
             totalVoxelUnrented += voxel
-        }else if(loan.isActive && isLoanListedGreatThanDays(loan,3) && voxel > 3){
-            voxel = Math.floor(voxel*0.9)
+        }else if(loan.isActive && isLoanListedGreatThanDays(loan,CONFIG.PRICE_DROP_DAYS) && voxel > CONFIG.MIN_PRICE_FOR_DECREASE){
+            voxel = Math.floor(voxel*CONFIG.PRICE_DECREASE_PERCENT)
             console.log(`loan ${loan.bundleUUID} has not been rented AND is greater than a threshold price dropped to ${voxel}`)
             await cancelRental(loan);
             // recreate for 10% less round down
@@ -65,7 +97,12 @@ async function checkVoxiesRentals() {
 
     async function cancelRental(loan: voxies.Loan) {
         try{
-            const cancelResult = await connectedContract.cancelLoan(loan.id);
+            const feeData = await provider.getFeeData();
+            
+            const cancelResult = await connectedContract.cancelLoan(loan.id, {
+                maxFeePerGas: feeData.maxFeePerGas! * CONFIG.GAS_MULTIPLIER,
+                maxPriorityFeePerGas: feeData.maxPriorityFeePerGas! * CONFIG.GAS_MULTIPLIER
+            })
             console.log(`canceling voxie loan ${loan.bundleUUID} - hash  ${cancelResult.hash}`);
             await provider.waitForTransaction(cancelResult.hash, 10);
            // console.log(`10 confirmations waited, loan ${loan.bundleUUID} canceled`);
@@ -78,6 +115,7 @@ async function checkVoxiesRentals() {
 
     async function createVoxiesRental(nftAddresses: string[],nftId: number[],voxelFee:number) {
         try{
+            const feeData = await provider.getFeeData();
             const uuid = uuidv4().replace(/-/g, '');
             //console.log(uuid);
             const result = await connectedContract.createLoanableItem(
@@ -85,10 +123,14 @@ async function checkVoxiesRentals() {
                 nftId,
                 BigInt(voxelFee) * 1000000000000000000n, //voxel fee in uint256
                 0, // 0% earned
-                604800,// 7 days
+                CONFIG.RENTAL_DURATION,// 7 days
                 "0x0000000000000000000000000000000000000000", // not reserved for anyone
                 1,// nft rewards to players
-                uuid)
+                uuid,
+                {
+                    maxFeePerGas: feeData.maxFeePerGas! * CONFIG.GAS_MULTIPLIER,
+                    maxPriorityFeePerGas: feeData.maxPriorityFeePerGas! * CONFIG.GAS_MULTIPLIER
+                })
             console.log(`creating new loan ${uuid} - hash ${result.hash}`)    
             await provider.waitForTransaction(result.hash, 10)
             //console.log(`10 confirmations waited, new loan created ${uuid}`)
@@ -122,6 +164,17 @@ function isLoanRentedQuickly(loan: voxies.Loan, minutes:number): boolean {
         return parseInt(loan.startingTime+"000") - parseInt(loan.timestamp+"000") < 60000*minutes;
     }
     return false
+}
+
+async function checkHealth(): Promise<boolean> {
+    try {
+        await provider.getNetwork();
+        await signer.getAddress();
+        return true;
+    } catch (error) {
+        Logger.error('Health check failed', error);
+        return false;
+    }
 }
 
 checkVoxiesRentals();
