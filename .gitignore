@@ -129,3 +129,5 @@ dist
 .yarn/install-state.gz
 .pnp.*
 .qodo
+
+rental_prices.json
