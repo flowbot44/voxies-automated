@@ -118,13 +118,11 @@ async function processRentals() {
     // Track rental prices for each NFT
     const rentalPrices = loadRentalPrices();
     
-
+    // Check inventory for unlisted NFTs and Voxies
+    await checkInventoryForRentals(rentalPrices);
 
     // Process existing rentals
     await checkVoxiesRentals(rentalPrices);
-
-    // Check inventory for unlisted NFTs and Voxies
-    await checkInventoryForRentals(rentalPrices);
 
     saveRentalPrices(rentalPrices); // Save prices to file
 }
