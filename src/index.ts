@@ -14,7 +14,7 @@ const CONFIG = {
     NFT_CONTRACT_ADDRESS: ethers.getAddress('0x8F8E18DbEbb8CA4fc2Bc7e3425FcdFd5264E33E8'), // Corrected checksum
     VOXIE_CONTRACT_ADDRESS: ethers.getAddress('0xfbe3AB0cbFbD17d06bdD73aA3F55aaf038720F59'), // Corrected checksum
     GAS_MULTIPLIER: 2n,
-    GAS_LIMIT_MULTIPLIER: 1.5, // Multiplier for gas limit
+    GAS_LIMIT_MULTIPLIER: 2, // Multiplier for gas limit
     RENTAL_DURATION: 604800, // 7 days
     PRICE_INCREASE_PERCENT: 1.1,
     PRICE_DECREASE_PERCENT: 0.9,
@@ -162,8 +162,11 @@ async function processInventory(contract: ethers.Contract, contractAddress: stri
         const balance = await contract.balanceOf(signer.address);
         Logger.log(`Found ${balance} items in ${contractAddress}`);
 
-        for (let i = 0; i < balance; i++) {
+        for (let i = 0; i < Number(balance); i++) { // Ensure i is less than balance
             try {
+                if(i >= Number(balance)){
+                    break;
+                }
                 const tokenId = Number(await contract.tokenOfOwnerByIndex(signer.address, i));
 
                 if (!rentedNftIds.has(tokenId)) {
