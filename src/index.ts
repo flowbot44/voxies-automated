@@ -181,6 +181,13 @@ async function manageTrackedRentals(rentalInfoMap: Map<number, RentalInfo>) {
                 // We own it, and it's not listed. Let's list it now.
                 Logger.log(`Found unlisted item #${tokenId} (owned) in tracking file. Listing...`);
                 
+                // ADD THIS CHECK:
+                const isAlreadyBundled = await voxieLoanContract.isBundled(contractAddress, tokenId);
+                if (isAlreadyBundled) {
+                    Logger.log(`Token #${tokenId} is already bundled on-chain. Skipping listing. Local file may be out of sync.`);
+                    continue; // Skip to the next item
+                }
+
                 // If the address was from the old format (placeholder), update it.
                 rentalInfo.nftAddress = contractAddress;
                 
@@ -200,6 +207,13 @@ async function manageTrackedRentals(rentalInfoMap: Map<number, RentalInfo>) {
         try {
             const loan: ContractLoan = await voxieLoanContract.loanItems(rentalInfo.loanId);
 
+            // ADD THIS BLOCK: If the loan is already canceled on-chain, update local state and skip.
+            if (loan.canceled) {
+                Logger.log(`Loan #${rentalInfo.loanId} for token #${tokenId} is already canceled on-chain. Updating local file.`);
+                delete rentalInfo.loanId;
+                continue; // Move to the next item
+            }
+
             if (loan.owner.toLowerCase() !== signer.address.toLowerCase()) {
                 Logger.log(`Loan ID ${rentalInfo.loanId} for token #${tokenId} no longer belongs to us. Removing from tracking.`);
                 delete rentalInfo.loanId;
@@ -218,21 +232,28 @@ async function manageTrackedRentals(rentalInfoMap: Map<number, RentalInfo>) {
             };
 
             if (isLoanExpired(loanForHelpers)) {
-                 Logger.log(`Loan for token #${tokenId} has expired. Cancelling and relisting...`);
+                Logger.log(`Loan for token #${tokenId} has expired. Cancelling and relisting...`);
                 const cancelSuccess = await cancelRental(rentalInfo.loanId);
                 if (cancelSuccess) {
-                    let newPrice = price;
-                     if(isLoanRentedQuickly(loanForHelpers, CONFIG.QUICK_RENTAL_MINUTES)){
+                    // ADD THIS: Wait for confirmation before proceeding
+                    const isUnbundled = await waitForNftToBeUnbundled(rentalInfo.nftAddress, tokenId);
+                    if (isUnbundled) {
+                        let newPrice = price;
+                        if(isLoanRentedQuickly(loanForHelpers, CONFIG.QUICK_RENTAL_MINUTES)){
                         newPrice = Math.ceil(price * CONFIG.PRICE_INCREASE_PERCENT);
                         Logger.log(`Loan for #${tokenId} was rented quickly. Increasing price to ${newPrice} VOXEL.`);
                     }
                     const newLoanData = await createVoxiesRental([rentalInfo.nftAddress], [tokenId], newPrice);
-                    if (newLoanData) {
+                    if (newLoanData?.loanId) { // Check for loanId specifically
                         rentalInfo.price = newPrice;
                         rentalInfo.loanId = newLoanData.loanId;
                         rentalInfo.bundleUUID = newLoanData.uuid;
                         rentalInfo.timestamp = Math.floor(Date.now() / 1000);
                     } else {
+                        delete rentalInfo.loanId;
+                    }
+                    } else {
+                        Logger.error(`Could not confirm unbundling for token #${tokenId}. Skipping relist for this cycle.`, null );
                         delete rentalInfo.loanId;
                     }
                 }
@@ -241,13 +262,20 @@ async function manageTrackedRentals(rentalInfoMap: Map<number, RentalInfo>) {
                 const newPrice = Math.floor(price * CONFIG.PRICE_DECREASE_PERCENT);
                 const cancelSuccess = await cancelRental(rentalInfo.loanId);
                 if (cancelSuccess) {
-                    const newLoanData = await createVoxiesRental([rentalInfo.nftAddress], [tokenId], newPrice);
-                     if (newLoanData) {
+                    // ADD THIS: Wait for confirmation before proceeding
+                    const isUnbundled = await waitForNftToBeUnbundled(rentalInfo.nftAddress, tokenId);
+                    if (isUnbundled) {
+                        const newLoanData = await createVoxiesRental([rentalInfo.nftAddress], [tokenId], newPrice);
+                        if (newLoanData?.loanId) { // Check for loanId specifically
                         rentalInfo.price = newPrice;
                         rentalInfo.loanId = newLoanData.loanId;
                         rentalInfo.bundleUUID = newLoanData.uuid;
                         rentalInfo.timestamp = Math.floor(Date.now() / 1000);
                     } else {
+                        delete rentalInfo.loanId;
+                    }
+                    } else {
+                        Logger.error(`Could not confirm unbundling for token #${tokenId}. Skipping relist for this cycle.`, null);
                         delete rentalInfo.loanId;
                     }
                 }
@@ -298,6 +326,11 @@ async function discoverAndListUntrackedItems(rentalInfoMap: Map<number, RentalIn
 
                     if (isUntrackedOrMistracked) {
                         Logger.log(`Found new or mistracked ${name} #${tokenId}. Creating rental...`);
+                        const isAlreadyBundled = await voxieLoanContract.isBundled(address, tokenId);
+                        if (isAlreadyBundled) {
+                            Logger.log(`Token #${tokenId} is already bundled on-chain. Skipping listing. Local file may be out of sync.`);
+                            continue; // Skip to the next item in the wallet
+                        }
                         // Use existing price if available, otherwise default
                         const price = existingRentalInfo?.price || CONFIG.DEFAULT_RENTAL_PRICE;
                         Logger.log(`Using price ${price} VOXEL for ${name} #${tokenId}`);
@@ -329,6 +362,36 @@ async function discoverAndListUntrackedItems(rentalInfoMap: Map<number, RentalIn
             Logger.error(`Error processing inventory for ${name} contract at ${address}`, error);
         }
     }
+}
+
+/**
+ * Polls the blockchain to wait for an NFT to be confirmed as "unbundled" after a loan cancellation.
+ * This prevents race conditions when relisting.
+ * @param nftAddress The NFT's contract address.
+ * @param tokenId The ID of the token.
+ * @param timeoutMs The maximum time to wait in milliseconds.
+ * @returns True if the NFT is confirmed unbundled, otherwise false.
+ */
+async function waitForNftToBeUnbundled(nftAddress: string, tokenId: number, timeoutMs: number = 45000): Promise<boolean> {
+    const startTime = Date.now();
+    Logger.log(`Waiting for token #${tokenId} to be unbundled...`);
+    
+    while (Date.now() - startTime < timeoutMs) {
+        try {
+            const isStillBundled = await voxieLoanContract.isBundled(nftAddress, tokenId);
+            if (!isStillBundled) {
+                Logger.log(`Token #${tokenId} is confirmed to be unbundled.`);
+                return true;
+            }
+        } catch (error) {
+            Logger.error(`Error checking if token #${tokenId} is bundled. Will retry.`, error);
+        }
+        // Wait for a few seconds before polling again
+        await new Promise(resolve => setTimeout(resolve, 3000));
+    }
+    
+    Logger.error(`Timeout waiting for token #${tokenId} to be unbundled.`, null);
+    return false;
 }
 
 /**
