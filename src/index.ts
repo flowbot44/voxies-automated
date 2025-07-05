@@ -238,6 +238,9 @@ async function manageTrackedRentals(rentalInfoMap: Map<number, RentalInfo>) {
                     // ADD THIS: Wait for confirmation before proceeding
                     const isUnbundled = await waitForNftToBeUnbundled(rentalInfo.nftAddress, tokenId);
                     if (isUnbundled) {
+                        // ADD THIS DELAY to allow the RPC node state to fully sync.
+                        Logger.log("Adding a 2-second delay before relisting to ensure state consistency.");
+                        await new Promise(resolve => setTimeout(resolve, 2000)); 
                         let newPrice = price;
                         if(isLoanRentedQuickly(loanForHelpers, CONFIG.QUICK_RENTAL_MINUTES)){
                         newPrice = Math.ceil(price * CONFIG.PRICE_INCREASE_PERCENT);
