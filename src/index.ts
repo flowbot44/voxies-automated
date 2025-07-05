@@ -9,7 +9,7 @@ require("dotenv").config();
 
 const CONFIG = {
     CRON_SCHEDULE: '0 */6 * * *',
-    RPC_URL: 'https://polygon-rpc.com/',
+    RPC_URL: process.env.RPC_URL || 'https://polygon-rpc.com/',
     CONTRACT_ADDRESS: '0x564edcE4FAa31e48421100a9Da7B8EB4A38b3654',
     NFT_CONTRACT_ADDRESS: ethers.getAddress('0x8F8E18DbEbb8CA4fc2Bc7e3425FcdFd5264E33E8'), // Corrected checksum
     VOXIE_CONTRACT_ADDRESS: ethers.getAddress('0xfbe3AB0cbFbD17d06bdD73aA3F55aaf038720F59'), // Corrected checksum
